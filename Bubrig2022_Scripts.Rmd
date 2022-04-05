@@ -1,0 +1,836 @@
+---
+title: "Analyses_Parasites_Metapops"
+author: "AK Gibson, LT Bubrig"
+date: "4/4/2022"
+output: html_document
+---
+Packages
+```{r}
+library(ggplot2)
+library(ggthemes)
+library(gridExtra)
+library(dplyr)
+library(lattice)
+library(lme4)
+library(MASS)
+library(ggplot2)
+library(survival)
+library(survminer)
+library(reshape)
+library(logistf)
+library(brglm)
+```
+
+from glmm_funs.R
+```{r}
+overdisp_fun <- function(model) {
+  ## number of variance parameters in 
+  ##   an n-by-n variance-covariance matrix
+  vpars <- function(m) {
+    nrow(m)*(nrow(m)+1)/2
+  }
+  model.df <- sum(sapply(VarCorr(model),vpars))+length(fixef(model))
+  (rdf <- nrow(model@frame)-model.df)
+  rp <- residuals(model)
+  Pearson.chisq <- sum(rp^2)
+  prat <- Pearson.chisq/rdf
+  pval <- pchisq(Pearson.chisq, df=rdf, lower.tail=FALSE,log.p=TRUE)
+  c(chisq=Pearson.chisq,ratio=prat,p=exp(pval),logp=pval)
+}
+```
+
+Survival analyses
+
+Data import and cleaning
+```{r}
+# data contains survival for four strains
+# for each strain, we had 25 control worms and 25 exposed at start
+# tracking survival up to 18 days out
+
+surdat<-read.csv("Bubrig2022_SurvivalData_DRYAD.csv",header=T)
+surdat$RandomID=factor(surdat$RandomID) # ID for worm
+
+# removing all censored worms
+surdat<-subset(surdat,surdat$Censored!="Y") # remove censored, 7 CB4856, 2 N2, 3 JU2132
+sumSur<-subset(surdat,surdat$Death==1) # trim data to day of death
+
+# subset datasets for plotting
+sumSurHW<-subset(sumSur,sumSur$Host=="CB4856") # subset
+sumSurHW$Host=factor(sumSurHW$Host) # ensure proper leveling
+
+sumSurN2<-subset(sumSur,sumSur$Host=="N2")
+sumSurN2$Host=factor(sumSurN2$Host)
+
+sumSur1762<-subset(sumSur,sumSur$Host=="JU1762")
+sumSur1762$Host=factor(sumSur1762$Host)
+
+sumSur2132<-subset(sumSur,sumSur$Host=="JU2132")
+sumSur2132$Host=factor(sumSur2132$Host)
+```
+
+Plotting survival, Fig S2
+```{r}
+# survival curves
+fitHW <- survfit(Surv(Day,Death)~ Treatment, data = sumSurHW) 
+fitN2 <- survfit(Surv(Day,Death)~ Treatment, data = sumSurN2)
+fit1762 <- survfit(Surv(Day,Death)~ Treatment, data = sumSur1762)
+fit2132 <- survfit(Surv(Day,Death)~ Treatment, data = sumSur2132)
+
+a<-ggsurvplot(fitHW, data = sumSurHW,conf.int = TRUE,fun = "pct",ggtheme=theme_minimal(),
+           size = 2,  font.tickslab = c(20, "plain", "black"),xlim=c(2,18),break.time.by=4,
+           linetype = "strata",palette = c("#0571b0","#ca0020"))
+b<-ggsurvplot(fit1762, data = sumSur1762,conf.int = TRUE,fun = "pct",ggtheme=theme_minimal(),
+           size = 2,  font.tickslab = c(20, "plain", "black"),xlim=c(2,18),break.time.by=4,
+           linetype = "strata",palette = c("#0571b0","#ca0020"))
+c<-ggsurvplot(fit2132, data = sumSur2132,conf.int = TRUE,fun = "pct",ggtheme=theme_minimal(),
+           size = 2,  font.tickslab = c(20, "plain", "black"),xlim=c(2,18),break.time.by=4,
+           linetype = "strata",palette = c("#0571b0","#ca0020"))
+d<-ggsurvplot(fitN2, data = sumSurN2,conf.int = TRUE,fun = "pct",ggtheme=theme_minimal(),
+           size = 2,  font.tickslab = c(20, "plain", "black"),xlim=c(2,18),break.time.by=4,
+           linetype = "strata",palette = c("#0571b0","#ca0020"))
+#combine - Fig S2
+splots<-list(a,c,b,d)
+arrange_ggsurvplots(splots,ncol=2,nrow=2,print=TRUE)
+```
+
+Relevant numbers on survival, Table 1
+```{r}
+# median survival times
+med=(matrix(ncol=9,nrow=8))
+med<-rbind(summary(fitHW)$table,summary(fit1762)$table,summary(fit2132)$table,summary(fitN2)$table)
+rownames(med)<-NULL
+host=c(rep("CB4856",2),rep("JU1762",2),rep("JU2132",2),rep("N2",2))
+treatment=rep(c("Control","Exposed"),4)
+med<-data.frame(cbind(host,treatment,med)) # Table 1
+
+# survival time to days 3,4, and 5 (major reproduction days) - only N2 shows a reduction
+summary(survfit(Surv(Day,Death) ~ Treatment, data = sumSurHW), times = 3:5)
+summary(survfit(Surv(Day,Death) ~ Treatment, data = sumSur1762), times = 3:5)
+summary(survfit(Surv(Day,Death) ~ Treatment, data = sumSur2132), times = 3:5)
+summary(survfit(Surv(Day,Death) ~ Treatment, data = sumSurN2), times = 3:5)
+```
+
+Analysis for survival - Table S3
+```{r}
+fit1<-coxph(Surv(Day,Death)~Treatment*Host, data = sumSur) 
+fit2<-coxph(Surv(Day,Death)~Treatment+Host, data = sumSur) 
+fit3<-coxph(Surv(Day,Death)~Host, data = sumSur)
+fit4<-coxph(Surv(Day,Death)~Treatment, data = sumSur)
+
+# model comparison
+f.aic<-c(AIC(fit1),AIC(fit2),AIC(fit3),AIC(fit4)) 
+delAIC<-f.aic-min(f.aic)
+relLik <- exp(-0.5 * delAIC)
+aicweight <- relLik/sum(relLik)
+aic.table<-data.frame(AIC = f.aic, delAIC = delAIC, relLik = relLik, 
+    weight = aicweight)
+rownames(aic.table) <- c("host:parasite", "host+parasite", "host", 
+    "treatment")
+anova(fit1,fit2)
+
+# best model
+aic.table
+summary(fit1)
+```
+
+Fecundity
+Data import and cleaning
+```{r}
+# data contains fecundity data for four strains
+# for each, 25 control worms, 25 exposed worms tracked individually
+# fecundity counts for 7 days
+# for per day fecundity, all data eligible
+# for lifetime fecundity, exclude censored worms first
+# N2 4 and 48 were also censored (males) but are not in the data
+
+fecdat<-read.csv("Bubrig2022_FecundityData_DRYAD.csv",header=T)
+fecdat$RandomizedID=factor(fecdat$RandomizedID) # unique ID within each host genotype
+fecdat$UniqueID=factor(fecdat$UniqueID) # each worm has a unique ID
+fecdat$ObsID=factor(fecdat$ObsID) # each fecundity count has a unique ID
+fecdat$DayID=factor(fecdat$DayID) # day in fecundity collection, unique days by genotype and treatment
+fecdat$PlateDay=factor(fecdat$PlateDay)
+
+# exclusion of any censored data points
+fecNcen=subset(fecdat,fecdat$Censored!="Y") # remove worms for which data is not available all day, 6 worms total
+
+# sum fecundity across individual worms
+SumFec <- fecNcen %>% 
+  group_by(UniqueID) %>% 
+  summarise( 
+    Total = n(),# number of observations
+    NOffspring=sum(Count), # total number of offspring per 
+    Host=first(Host), # host genotype
+    Treatment=first(Treatment)) # exposure treatment
+
+# fecundity schedule - sum by day, host and treatment
+FDay<-fecNcen %>% 
+  group_by(DayID) %>% # unique for host*treatment to facilitate grouping
+  summarise( 
+    Total = n(),  
+    NOffspring=mean(Count),
+    Host=first(Host),
+    Treatment=first(Treatment),
+    PlateDay=first(PlateDay)) 
+total<-tapply(FDay$NOffspring,list(FDay$Host,FDay$Treatment),sum) # mean lifetime fecundity
+```
+
+Fecundity Plots, Figure 1 and S3
+```{r}
+# Figure 1 - lifetime fecundity by genotype and treatment
+pf1<-ggplot(SumFec, aes(x=Treatment, y=NOffspring,group=Host,fill=Host,shape=Host)) 
+pf1 +
+  scale_fill_manual(values=c("#000000","#969696","#d9d9d9","#525252"))+
+  stat_summary(fun = mean,position = position_dodge(width = .25),
+               geom = "line",size=1.25,linetype="longdash")+
+  stat_summary(fun.data = mean_cl_normal,position = position_dodge(width = .25),
+               geom = "errorbar",color="black",size=1,width=0.25)+
+  stat_summary(fun = mean,position = position_dodge(width = .25),
+               geom = "point",cex=7,shape=c(22,22,24,24,23,23,21,21),color="black",
+               stroke=1.5)+
+  theme_bw()+
+  xlab("Treatment")+ylab("Number of Offspring")+
+  theme(axis.text.x = element_text(color = "grey20", size = 25),
+        axis.text.y = element_text(color = "grey20", size = 25),
+        axis.title.y = element_text(color = "grey20", size = 30),
+        axis.title.x = element_text(color = "grey20", size = 30))
+
+# Figure S3 - fecundity schedule by genotype and treatment
+pfs1<-ggplot(fecdat, aes(x=PlateDay, y=Count,group=Treatment,color=Treatment)) 
+pfs1+geom_line(aes(group=UniqueID),alpha=0.2,linetype="solid")+  
+  scale_colour_manual(values=c("#0571b0","#ca0020"))+
+    facet_grid(cols=vars(Host))+
+  theme_bw()+ylim(-1,290)+
+    stat_summary(fun = mean,
+               geom = "line",size=1.5,aes(group=Treatment,color=Treatment)) +
+  stat_summary(fun = mean,
+               geom = "linerange",color="black",size=1,
+               fun.max = function(x) mean(x) + 
+                 qt(.975, df = length(x)) * sd(x) / sqrt(length(x)),
+               fun.min = function(x) mean(x) - 
+                 qt(.975, df = length(x)) * sd(x) / sqrt(length(x)),
+               aes(group=Treatment,color=Treatment))+
+   stat_summary(fun = mean,
+             geom = "point",cex=4,aes(group=Treatment,color=Treatment))+
+  xlab("Day")+ylab("Number of Offspring")+
+  theme(axis.text.x = element_text(color = "grey20", size = 25),
+        axis.text.y = element_text(color = "grey20", size = 25),
+        
+        axis.title.y = element_text(color = "grey20", size = 30),
+        axis.title.x = element_text(color = "grey20", size = 30))
+```
+
+Relevant numbers on fecundity
+```{r}
+# mean fecundity by treatment and genotype
+LFMeans<-tapply(SumFec$NOffspring,list(SumFec$Host,SumFec$Treatment),mean)
+LFSE<-tapply(SumFec$NOffspring,list(SumFec$Host,SumFec$Treatment),sd)/sqrt(tapply(SumFec$NOffspring,list(SumFec$Host,SumFec$Treatment),length))
+
+#proportional loss with parasites
+propLoss<-1-LFMeans[,2]/LFMeans[,1]
+meanpL=mean(propLoss)
+sepL=sd(propLoss)/sqrt(4)
+#summary of schedule - when are most eggs laid?
+FDay$Total=c(rep(LFMeans[1,1],6),rep(LFMeans[1,2],6),rep(LFMeans[4,1],6),rep(LFMeans[4,2],6),
+             rep(LFMeans[2,1],6),rep(LFMeans[2,2],6),rep(LFMeans[3,1],6),rep(LFMeans[3,2],6))
+dayfraction=FDay$NOffspring/FDay$Total
+host<-c(rep("CB4856",12),rep("N2",12),rep("JU1762",12),rep("Ju2132",12))
+treatment<-c(rep(c(rep("Control",6),rep("Exposed",6)),2))
+day<-c(rep(seq(2,7,1),4))
+dailyFraction=data.frame(cbind(host,treatment,day,dayfraction))
+colnames(dailyFraction)=c("Host","Treatment", "PlateDay","Proportion of Total")
+# see Bubrig2022_DailyFecunditySummaries_DRYAD.xls
+
+# summary of daily fecundity reductions
+daily<-1-FDay$NOffspring[FDay$Treatment=="Exposed"]/FDay$NOffspring[FDay$Treatment=="Control"]
+host<-c(rep("CB4856",6),rep("N2",6),rep("JU1762",6),rep("Ju2132",6))
+dailyLoss<-data.frame(cbind(host,day,daily))
+colnames(dailyLoss)=c("Host","PlateDay","Proportional Reduction")
+
+```
+
+Analysis for fecundity, Tables S4,S5
+```{r}
+#Lifetime fecundity
+# fixed = host, treatment
+# distribution = poisson
+lfmodel1<-glm(NOffspring~Host*Treatment,data=SumFec,family="poisson")
+dp = sum(residuals(lfmodel1,type ="pearson")^2)/lfmodel1$df.residual
+dp # heavily overdispersed
+# negative binomial
+lfmodel3<-glm.nb(NOffspring~Host*Treatment,data=SumFec)
+AIC(lfmodel1,lfmodel3)
+
+# other candidate models
+lfmodel4=update(lfmodel3,.~.-Host:Treatment) # evaluate interaction
+lfmodel5=update(lfmodel4,.~.-Treatment) # treatment
+lfmodel6=update(lfmodel4,.~.-Host) # host
+
+# model comparison
+f.aic<-c(lfmodel3$aic,lfmodel4$aic,lfmodel5$aic,lfmodel6$aic) 
+delAIC<-f.aic-min(f.aic)
+relLik <- exp(-0.5 * delAIC)
+aicweight <- relLik/sum(relLik)
+aic.table<-data.frame(AIC = f.aic, delAIC = delAIC, relLik = relLik, 
+    weight = aicweight)
+rownames(aic.table) <- c("host:parasite", "host+parasite", "host", 
+    "treatment")
+anova(lfmodel3,lfmodel4)
+
+# model 3 with the interaction, indicating differential reactions across genotypes
+aic.table
+summary(lfmodel3) 
+
+# fecundity schedule
+# fixed = host * treatment, treatment*Day
+# random = Unique ID
+# distribution = poisson
+fs1<-glmer(Count~Treatment*Host+ Treatment*PlateDay+(1|UniqueID),
+           data=fecdat,family="poisson",control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e5)))
+overdisp_fun(fs1)
+fs2<-glmer(Count~Treatment*Host + Treatment*PlateDay+(1|UniqueID) + (1|ObsID),
+           data=fecdat,family="poisson",control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e5)))
+fs3<-update(fs2,.~.-Treatment:Host)
+fs4<-update(fs2,.~.-Treatment:PlateDay)
+fs5<-update(fs3,.~.-Treatment:PlateDay)
+
+f.aic<-c(AIC(fs2),AIC(fs3),AIC(fs4),AIC(fs5)) 
+delAIC<-f.aic-min(f.aic)
+relLik <- exp(-0.5 * delAIC)
+aicweight <- relLik/sum(relLik)
+aic.table<-data.frame(AIC = f.aic, delAIC = delAIC, relLik = relLik, 
+    weight = aicweight)
+rownames(aic.table) <- c("treatment*Host+treatment*day","treatment*day","treatment*host",
+                         "Treatment+Host+Day")
+aic.table
+summary(fs2)
+```
+
+Population growth
+Data import and cleaning
+```{r}
+# dataset contains 3 blocks
+# Block 2 - N2 and CB4856
+# Block 3 - 5 "wild" lines 
+# Block 4 - N2, CB4856, + 4 "wild" lines
+# Worm #76 in block 4, JU2816 control, censored because of errors in processing plates - not in the dataset
+
+pgdat<-read.csv("Bubrig2022_PopulationGrowth_DRYAD.csv",header=T)
+pgdat<-subset(pgdat,pgdat$Male!="Y") # excluding populations founded by males
+pgdat<-transform(pgdat,
+                 Randomized.ID=factor(Randomized.ID), # ID within block
+                 Block=factor(Block), # separate trials
+                 Count.Replicate=factor(Count.Replicate), # replicate counts within worms
+                 ObsID=factor(ObsID),
+                 Host=factor(Host)) # id for each individual count
+
+# add an id term
+pgdat<-within(pgdat,
+              {
+                ID<-interaction(Block, Randomized.ID)
+              }) # unique ID for each population, across all blocks
+
+# mean for populations
+pg_sum1 <- pgdat %>% 
+  group_by(ID) %>% 
+  summarise( 
+    Total = n(),  
+    mean.count=mean(Count),
+    Host=first(Host),
+    Treatment=first(Treatment)) 
+
+# summary
+PGMeans<-tapply(pg_sum1$mean.count,list(pg_sum1$Host,pg_sum1$Treatment),mean,na.rm=T)
+PGSD<-tapply(pg_sum1$mean.count,list(pg_sum1$Host,pg_sum1$Treatment),sd,na.rm=T)
+PGSE<-PGSD/sqrt(tapply(pg_sum1$mean.count,list(pg_sum1$Host,pg_sum1$Treatment),length))
+ratio = PGMeans[,2]/PGMeans[,1]
+ratioSE = ratio*sqrt((PGSE[,1]/PGMeans[,1])^2+(PGSE[,2]/PGMeans[,2])^2)
+f2dat=cbind(ratio,ratioSE)
+f2dat <- cbind(rownames(f2dat), data.frame(f2dat, row.names=NULL))
+colnames(f2dat)=c("Host","Ratio","SE")
+```
+
+Population Growth Plot - Figure 2, S4
+```{r}
+#Figure 2
+pf2<-ggplot(pg_sum1, aes(x=Treatment, y=mean.count,group=Host,fill=Host,shape=Host)) 
+pf2 +
+  scale_fill_manual(values=c("#000000","white","#969696","#d9d9d9","white","white","#525252"))+
+  stat_summary(fun = mean,position = position_dodge(width = .25),
+               geom = "line",size=c(1.25,1.25,0.75,0.75,1.25,1.25,1.25,1.25,0.75,0.75,0.75,0.75,1.25,1.25),linetype=c("solid","solid","dotted","dotted","solid","solid","solid","solid","dotted","dotted","dotted","dotted","solid","solid"))+
+  stat_summary(fun.data = mean_cl_normal,position = position_dodge(width = .25),
+               geom = "errorbar",color="black",size=1,width=0.25)+
+  stat_summary(fun = mean,position = position_dodge(width =0.25),
+               geom = "point",cex=c(7,7,4,4,7,7,7,7,4,4,4,4,7,7),shape=c(22,22,25,25,24,24,23,23,22,22,21,21,21,21),color="black",
+               stroke=1.5)+
+  theme_bw()+
+  xlab("Treatment")+ylab("Number of Offspring")+
+  theme(axis.text.x = element_text(color = "grey20", size = 25),
+        axis.text.y = element_text(color = "grey20", size = 25),
+        axis.title.y = element_text(color = "grey20", size = 30),
+        axis.title.x = element_text(color = "grey20", size = 30))
+
+#Figure S4
+#showing data for each genotype
+# order
+pg_sum1o=pg_sum1
+pg_sum1o$Host=factor(pg_sum1$Host,levels=c("CB4856","JU1762","JU2132","N2","JU1249","JU2287","JU2816"))
+pfs2<-ggplot(pg_sum1o, aes(x=Treatment, y=mean.count,group=Treatment,color=Treatment)) 
+pfs2+ geom_jitter(position=position_jitter(0.2),cex=4,alpha=0.6) +
+  scale_colour_manual(values=c("#0571b0","#ca0020"))+
+  stat_summary(fun = mean,
+               geom = "linerange",color="black",size=1,
+               fun.max = function(x) mean(x) + 
+                 qt(.975, df = length(x)) * sd(x) / sqrt(length(x)),
+               fun.min = function(x) mean(x) - 
+                 qt(.975, df = length(x)) * sd(x) / sqrt(length(x)))+
+  stat_summary(fun = mean,
+               geom = "point",cex=5,color="black")+
+  stat_summary(fun = mean,
+               geom = "line",size=1,color="black",aes(group=Host))+
+  facet_grid(cols=vars(Host))+
+  theme_bw()+
+  theme(axis.text.x = element_text(color = "grey20", size = 15),
+        axis.text.y = element_text(color = "grey20", size = 15),
+        axis.title.y = element_text(color = "grey20", size = 20),
+        axis.title.x = element_text(color = "grey20", size = 20))
+```
+
+Population Growth Relevant Numbers
+```{r}
+PGTable<-cbind(PGMeans[,1],PGSE[,1],PGMeans[,2],PGSE[,2],ratio,ratioSE)
+colnames(PGTable)=c("Control Mean","Control SE","Exposed Mean","Exposed SE","Ratio","RatioSE")
+1-mean(PGTable[,5])
+sd(PGTable[,5])/sqrt(7)
+1-PGTable[,5]
+```
+
+Analysis of Population Growth, Table S6
+```{r}
+# fixed effect: host, treatment, and interaction
+# random effects: block and unique ID to group counts from same individual
+pgmodel1<-glmer(Count~Host*Treatment+Block+(1|ID),data=pgdat,family="poisson")
+overdisp_fun(pgmodel1)  # overdispersed
+pgmodel2 <- glmer(Count~Host*Treatment+Block+(1|ID)+(1|ObsID),data=pgdat,family="poisson",
+                  control=glmerControl(optimizer="bobyqa",
+                            optCtrl=list(maxfun=2e5)))# add in observation id to deal with overdispersion
+overdisp_fun(pgmodel2)
+
+pgmodel3<-update(pgmodel2,.~.-Host:Treatment)
+pgmodel4<-update(pgmodel3,.~.-Host)
+pgmodel5<-update(pgmodel3,.~.-Treatment)
+
+# model comparison
+f.aic<-c(AIC(pgmodel2),AIC(pgmodel3),AIC(pgmodel4),AIC(pgmodel5)) 
+delAIC<-f.aic-min(f.aic)
+relLik <- exp(-0.5 * delAIC)
+aicweight <- relLik/sum(relLik)
+aic.table<-data.frame(AIC = f.aic, delAIC = delAIC, relLik = relLik, 
+    weight = aicweight)
+rownames(aic.table) <- c("host:parasite", "host+parasite", "treatment", 
+    "host")
+
+# model 2 with the interaction, indicating differential reactions across genotypes
+aic.table
+summary(pgmodel2) 
+summary(pgmodel3)  
+```
+
+Dispersal
+Data import and cleaning
+```{r}
+# Experiment 1
+  # data contains dispersal success data for N2
+  # control: 2 populations, 20 worms each
+  # exposed: 3 populations, 20 worms each
+
+OD<-read.csv("Bubrig2022_DispersalExp1_DRYAD.csv",header=T)
+OD<-subset(OD,OD$Censored==0)
+
+# summarize
+# count number of worms that made babies for each treatment*dose*replicate
+SumOD <- OD %>% 
+  group_by(PopID) %>% # ID grouping individuals with same trial*dose
+  summarise( 
+    Total = n(),  
+    Babies=sum(Babies),
+    Treatment=first(Treatment),
+    Dose=first(EffectiveDose))
+SumOD$Rate = SumOD$Babies/SumOD$Total
+
+# Dispersal Experiment 2
+  # 3 doses/timings of exposure
+  # 1 genotype, N2
+  # 3 populations each, 20 worms per population
+DD<-read.csv("Bubrig2022_DispersalExp2_DRYAD.csv",header=T)
+DD$PlateID=factor(DD$PlateID)
+DD$ExposureDay=factor(DD$ExposureDay) # dose - order may be confusing
+DD$Replicate=factor(DD$Replicate)
+
+# exclude
+# there is one male in this dataset, in the control treatment 
+# 1 exposed and 1 control worm were censored
+DD<-subset(DD,DD$Male!=1 & DD$Censored!=1)
+
+# summarize
+DD = subset(DD,DD$Babies!="NA") # removes data points before decision point
+# count number of worms that made babies for each treatment*dose*replicate
+SumDD <- DD %>% 
+  group_by(RepID) %>% # identifies worms from same parent replicate plate
+  summarise( 
+    Total = n(), # total worms
+    Babies=sum(Babies)) # total worms that made babies
+
+# adding additional information to table - dose, treatment, success rate
+Dose=rep(c("high","high","high","medium","medium","medium","low","low","low"),2)
+Treatment=c(rep("Control",9),rep("Exposed",9))
+SuccessRate = SumDD$Babies/SumDD$Total
+SumDD<-cbind(SumDD,Dose,Treatment,SuccessRate)
+
+# Experiment 3
+  # 1 dose/timing of exposure - medium
+  # 4 genotypes, N2, CB4856, JU1762, JU2132
+  # 3 populations each, 20 worms each
+DV<-read.csv("Bubrig2022_DispersalExp3_DRYAD.csv",header=T)
+DV$PlateID=factor(DV$PlateID)
+DV$Replicate=factor(DV$Replicate)
+DV$RepID=factor(DV$RepID)
+
+# exclude censored individuals
+DV<-subset(DV,DV$Censored!=1)
+# DV includes males
+# DVf does not include males
+DVf<-subset(DV,DV$Male!=1)
+
+# subset on data points that establish reproductive success
+DV1 = subset(DV, DV$BabiesAlt!="NA") # with males, coded as successful
+DVf1 = subset(DVf,DVf$Babies!="NA") # without males
+
+SumDV <- DV1 %>% 
+  group_by(RepID) %>%
+  summarise( 
+    Total = n(),  
+    Reproductive=sum(BabiesAlt),
+    Host=first(Host),
+    Treatment=first(Treatment)) 
+SumDV$SuccessRate=SumDV$Reproductive/SumDV$Total
+SumDVf <- DVf1 %>% 
+  group_by(RepID) %>%
+  summarise( 
+    Total = n(),  
+    Reproductive=sum(Babies),
+    Host=first(Host),
+    Treatment=first(Treatment)) 
+SumDVf$SuccessRate=SumDVf$Reproductive/SumDVf$Total
+
+```
+
+Dispersal Success Plots, Figure 3, S5
+```{r}
+# Figure 3A - experiment 1, dispersal success by treatment
+pf3a<-ggplot(SumOD, aes(x=Treatment, y=Rate,group=Treatment)) 
+pf3a +
+  stat_summary(fun.data = mean_se,
+               geom = "errorbar",color="black",size=1,width=0.35)+ylim(-0.025,1.025)+
+  stat_summary(fun = base::mean,geom = "point",cex=9,shape=21,stroke=1.5, fill="#525252")+
+  theme_bw()+
+  xlab("Treatment")+ylab("Rate")+
+  theme(axis.text.x = element_text(color = "grey20", size = 20),
+        axis.text.y = element_text(color = "grey20", size = 25),
+        axis.title.y = element_text(color = "grey20", size = 30),
+        axis.title.x = element_text(color = "grey20", size = 30))
+
+# Figure 3b - experiment 2, dispersal success by exposure level
+SumDD$Dose=factor(SumDD$Dose,levels=c("high","medium","low"))
+pf3b<-ggplot(SumDD, aes(x=Treatment,y=SuccessRate,group=Treatment,fill=Treatment)) 
+pf3b + ylim(-0.025,1.025)+
+  stat_summary(fun.data = mean_se,
+               geom = "errorbar",color="black",size=1,width=0.35)+
+   stat_summary(fun = base::mean,
+               geom = "point",cex=9,shape=21,stroke=1.5, fill="#525252")+
+  theme_bw()+ facet_grid(cols=vars(Dose))+
+  xlab("Treatment")+ylab("Rate")+
+  theme(axis.text.x = element_text(color = "grey20", size = 20),
+        axis.text.y = element_text(color = "grey20", size = 25),
+        axis.title.y = element_text(color = "grey20", size = 30),
+        axis.title.x = element_text(color = "grey20", size = 30))
+
+# Figure 3c - experiment 3, dispersal success by treatment and genotype, without males
+pf3c<-ggplot(SumDVf, aes(x=Treatment,y=SuccessRate,group=Treatment,fill=Host)) 
+pf3c + ylim(-0.025,1.025)+
+  scale_fill_manual(values=c("#000000","#969696","#d9d9d9","#525252"))+
+  stat_summary(fun.data = mean_se,
+               geom = "errorbar",color="black",size=1,width=0.35)+
+   stat_summary(fun = base::mean,
+               geom = "point",cex=9,shape=c(22,22,24,24,23,23,21,21),stroke=1.5)+
+  theme_bw()+ facet_grid(cols=vars(Host))+
+  xlab("Treatment")+ylab("Rate")+
+  theme(axis.text.x = element_text(color = "grey20", size = 20),
+        axis.text.y = element_text(color = "grey20", size = 25),
+        axis.title.y = element_text(color = "grey20", size = 30),
+        axis.title.x = element_text(color = "grey20", size = 30))
+
+# Figure S5 - figure 3C with males
+pfs3c<-ggplot(SumDV, aes(x=Treatment,y=SuccessRate,group=Treatment,fill=Host)) 
+pfs3c + ylim(-0.025,1.025)+
+  scale_fill_manual(values=c("#000000","#969696","#d9d9d9","#525252"))+
+  stat_summary(fun.data = mean_se,
+               geom = "errorbar",color="black",size=1,width=0.35)+
+   stat_summary(fun = base::mean,
+               geom = "point",cex=9,shape=c(22,22,24,24,23,23,21,21),stroke=1.5)+
+  theme_bw()+ facet_grid(cols=vars(Host))+
+  xlab("Treatment")+ylab("Rate")+
+  theme(axis.text.x = element_text(color = "grey20", size = 20),
+        axis.text.y = element_text(color = "grey20", size = 25),
+        axis.title.y = element_text(color = "grey20", size = 30),
+        axis.title.x = element_text(color = "grey20", size = 30))
+```
+
+Dispersal Relevant Numbers
+```{r}
+# Experiment 1
+total<-melt(tapply(SumOD$Total,list(SumOD$Treatment),sum))
+babies<-melt(tapply(SumOD$Babies,list(SumOD$Treatment),sum))
+mean<-melt(tapply(SumOD$Rate,list(SumOD$Treatment),mean))
+se<-melt(tapply(SumOD$Rate,list(SumOD$Treatment),sd)/sqrt(tapply(SumOD$Rate,list(SumOD$Treatment),length)))
+ODSum = cbind(mean,se$value,total$value,babies$value)
+colnames(ODSum) = c("Treatment","Mean","SE","Total","TotalBabies")
+
+# Experiment 2 - SumDD for counts; DDSum for mean success rates
+# means and errors
+mean<-melt(tapply(SumDD$SuccessRate,list(SumDD$Dose,SumDD$Treatment),mean))
+se<-melt(tapply(SumDD$SuccessRate,list(SumDD$Dose,SumDD$Treatment),sd)/sqrt(3))
+DDSum = cbind(mean,se$value)
+colnames(DDSum) = c("Dose","Treatment","Mean","SE")
+DDSum$Dose=factor(DDSum$Dose,levels=c("high","medium","low"))
+mean(mean$value[mean$X2=="Exposed"])
+sd(mean$value[mean$X2=="Exposed"])/sqrt(3)
+
+# Experiment 3
+# means and errors
+# without males
+meanDVf<-melt(tapply(SumDVf$SuccessRate,list(SumDVf$Host,SumDVf$Treatment),mean))
+seDVf<-melt(tapply(SumDVf$SuccessRate,list(SumDVf$Host,SumDVf$Treatment),sd)/sqrt(3))
+DVfSum = cbind(meanDVf,seDVf$value)
+colnames(DVfSum) = c("Host","Treatment","Mean","SE")
+mean(DVfSum$Mean[DVfSum$Treatment=="Exposed"])
+sd(DVfSum$Mean[DVfSum$Treatment=="Exposed"])/sqrt(4)
+# with males
+meanDV<-melt(tapply(SumDV$SuccessRate,list(SumDV$Host,SumDV$Treatment),mean))
+seDV<-melt(tapply(SumDV$SuccessRate,list(SumDV$Host,SumDV$Treatment),sd)/sqrt(3))
+DVSum = cbind(meanDV,seDV$value)
+colnames(DVSum) = c("Host","Treatment","Mean","SE")
+```
+
+Analysis - tables s7-10
+```{r}
+# Experiment 1 Table S7
+# models
+om1<-brglm(cbind(Babies,Total-Babies)~Treatment,data=SumOD,family=binomial(logit),method="glm.fit") # issue with rare events
+om2<-brglm(cbind(Babies,Total-Babies)~Treatment,data=SumOD,family=binomial(logit),method="brglm.fit") 
+# om2 has more reasonable estimates
+om3<-update(om2,.~.-Treatment)
+# model comparison
+f.aic<-c(AIC(om2),AIC(om3)) 
+delAIC<-f.aic-min(f.aic)
+relLik <- exp(-0.5 * delAIC)
+aicweight <- relLik/sum(relLik)
+aic.table<-data.frame(AIC = f.aic, delAIC = delAIC, relLik = relLik, 
+    weight = aicweight)
+rownames(aic.table) <- c("+treatment","-treatment")
+# winner - Table S7
+aic.table
+summary(om2)
+
+# Experiment 2 Table S8
+# models
+dd1<-brglm(cbind(Babies,Total-Babies)~Dose*Treatment,data=SumDD,family=binomial(logit),method="glm.fit") 
+dd2<-brglm(cbind(Babies,Total-Babies)~Dose*Treatment,data=SumDD,family=binomial(logit),method="brglm.fit")
+dd3<-update(dd2,.~.-Dose:Treatment)
+dd4<-update(dd3,.~.-Treatment)
+dd5<-update(dd3,.~.-Dose)
+dd6<-update(dd5,.~.-Treatment)
+# model comparison
+f.aic<-c(AIC(dd2),AIC(dd3),AIC(dd4),AIC(dd5) )
+delAIC<-f.aic-min(f.aic)
+relLik <- exp(-0.5 * delAIC)
+aicweight <- relLik/sum(relLik)
+aic.table<-data.frame(AIC = f.aic, delAIC = delAIC, relLik = relLik, 
+    weight = aicweight)
+rownames(aic.table) <- c("Dose:Treatment","Dose+Treatment","Dose","Treatment")
+# winner
+aic.table
+summary(dd3)
+
+# Experiment 3 - Table S9
+# without males
+dv1<-brglm(cbind(Reproductive,Total-Reproductive)~Host*Treatment,data=SumDVf,family=binomial(logit),method="glm.fit") 
+# bias-reduced fit
+dv2<-brglm(cbind(Reproductive,Total-Reproductive)~Host*Treatment,data=SumDVf,family=binomial(logit),method="brglm.fit")
+# parameters look better
+dv3<-update(dv2,.~.-Host:Treatment)
+dv4<-update(dv3,.~.-Treatment)
+dv5<-update(dv3,.~.-Host)
+# model comparison
+f.aic<-c(AIC(dv2),AIC(dv3),AIC(dv4),AIC(dv5)) 
+delAIC<-f.aic-min(f.aic)
+relLik <- exp(-0.5 * delAIC)
+aicweight <- relLik/sum(relLik)
+aic.table<-data.frame(AIC = f.aic, delAIC = delAIC, relLik = relLik, 
+    weight = aicweight)
+rownames(aic.table) <- c("Host:Treatment","Host+Treatment","Host","Treatment")
+aic.table
+summary(dv3)
+summary(dv2)
+
+# with males - table S10
+dvm1<-brglm(cbind(Reproductive,Total-Reproductive)~Host*Treatment,data=SumDV,family=binomial(logit),method="glm.fit") 
+# bias-reduced fit
+dvm2<-brglm(cbind(Reproductive,Total-Reproductive)~Host*Treatment,data=SumDV,family=binomial(logit),method="brglm.fit")
+# parameters look better
+dvm3<-update(dvm2,.~.-Host:Treatment)
+dvm4<-update(dvm3,.~.-Treatment)
+dvm5<-update(dvm3,.~.-Host)
+# model comparison
+f.aic<-c(AIC(dvm2),AIC(dvm3),AIC(dvm4),AIC(dvm5)) 
+delAIC<-f.aic-min(f.aic)
+relLik <- exp(-0.5 * delAIC)
+aicweight <- relLik/sum(relLik)
+aic.table<-data.frame(AIC = f.aic, delAIC = delAIC, relLik = relLik, 
+    weight = aicweight)
+rownames(aic.table) <- c("Host:Treatment","Host+Treatment","Host","Treatment")
+aic.table
+summary(dvm3)
+summary(dvm2)
+```
+
+Project of parasite-mediated selection across scales
+Data
+```{r}
+# Fecundity - fecundity of exposed relative to control hermaphrodites
+FRatio<-LFMeans[,2]/LFMeans[,1]
+FRatioSE<-FRatio*sqrt((LFSE[,1]/LFMeans[,1])^2+(LFSE[,2]/LFMeans[,2])^2)
+
+# Population Growth - population size of exposed relative to control hermaphrodites
+PGRatio = PGMeans[,2]/PGMeans[,1]
+PGRatioSE = PGRatio*sqrt((PGSE[,1]/PGMeans[,1])^2+(PGSE[,2]/PGMeans[,2])^2)
+# reduce to focal relevant genotypes
+PGRatio=c(PGRatio[1],PGRatio[3],PGRatio[4],PGRatio[7])
+PGRatioSE=c(PGRatioSE[1],PGRatioSE[3],PGRatioSE[4],PGRatioSE[7])
+
+# Dispersal - relative number of successful colonists of exposed relative to control - no males
+DVfM=cbind(DVfSum$Mean[1:4],DVfSum$Mean[5:8])
+rownames(DVfM)=DVfSum$Host[1:4]
+colnames(DVfM)=c("Control","Exposed")
+DVfSE=cbind(DVfSum$SE[1:4],DVfSum$SE[5:8])
+rownames(DVfSE)=DVfSum$Host[1:4]
+colnames(DVfSE)=c("Control","Exposed")
+PGM=PGMeans[-c(2,5,6),]
+PGSE2=PGSE[-c(2,5,6),]
+
+Colonist = PGM*DVfM
+ColonistSE = Colonist * sqrt((PGSE2 / PGM) ^ 2 + (DVfSE / DVfM) ^ 2)
+
+DfRatio<-Colonist[,2]/Colonist[,1]
+DfRatioSE<-DfRatio*sqrt((ColonistSE[,1]/Colonist[,1])^2+(ColonistSE[,2]/Colonist[,2])^2)
+
+# Dispersal - relative number of successful colonists of exposed relative to control - with males
+DVM=cbind(DVSum$Mean[1:4],DVSum$Mean[5:8])
+rownames(DVM)=DVSum$Host[1:4]
+colnames(DVM)=c("Control","Exposed")
+DVSE=cbind(DVSum$SE[1:4],DVSum$SE[5:8])
+rownames(DVSE)=DVSum$Host[1:4]
+colnames(DVSE)=c("Control","Exposed")
+
+Colonistm = PGM*DVM
+ColonistmSE = Colonistm * sqrt((PGSE2 / PGM) ^ 2 + (DVSE / DVM) ^ 2)
+
+DRatio<-Colonistm[,2]/Colonistm[,1]
+DRatioSE<-DRatio*sqrt((ColonistmSE[,1]/Colonistm[,1])^2+(ColonistmSE[,2]/Colonistm[,2])^2)
+
+# making data frames
+Host=c("JU2132","JU1762","N2","CB4856")
+index<-c(4,2,1,3)
+#Fecundity
+FMat=data.frame(rep("Fecundity",4),FRatio[order(index)],FRatioSE[order(index)])
+FMat<-cbind(Host,FMat,row.names=NULL)
+colnames(FMat)=c("Host","Metric","Ratio","SE")
+#PopulationGrowth
+PGMat=data.frame(rep("Population Growth",4),PGRatio[order(index)],PGRatioSE[order(index)])
+PGMat<-cbind(Host,PGMat,row.names=NULL)
+colnames(PGMat)=c("Host","Metric","Ratio","SE")
+#Dispersal
+#no males
+DfMat=data.frame(rep("Dispersal",4),DfRatio[order(index)],DfRatioSE[order(index)])
+DfMat<-cbind(Host,DfMat,row.names=NULL)
+colnames(DfMat)=c("Host","Metric","Ratio","SE")
+#with males
+DMat=data.frame(rep("Dispersal",4),DRatio[order(index)],DRatioSE[order(index)])
+DMat<-cbind(Host,DMat,row.names=NULL)
+colnames(DMat)=c("Host","Metric","Ratio","SE")
+
+DComF=rbind(FMat,PGMat,DfMat)
+DCom=rbind(FMat,PGMat,DMat)
+DComF$Metric=factor(DComF$Metric,levels=c("Fecundity","Population Growth","Dispersal"))
+DComF$Host=factor(DComF$Host,levels=c("CB4856","N2","JU1762","JU2132"))
+DCom$Metric=factor(DCom$Metric,levels=c("Fecundity","Population Growth","Dispersal"))
+DCom$Host=factor(DCom$Host,levels=c("CB4856","N2","JU1762","JU2132"))
+
+# relevant comparisons
+fr<-mean(DComF$Ratio[DComF$Metric=="Fecundity"])
+sd(DComF$Ratio[DComF$Metric=="Fecundity"])/sqrt(4)
+pgr<-mean(DComF$Ratio[DComF$Metric=="Population Growth"])
+sd(DComF$Ratio[DComF$Metric=="Population Growth"])/sqrt(4)
+dr<-mean(DComF$Ratio[DComF$Metric=="Dispersal"])
+sd(DComF$Ratio[DComF$Metric=="Dispersal"])/sqrt(4)
+
+(1-dr)/(1-fr) # dispersal performance reduction against fecundity
+(1-dr)/(1-pgr) # dispersal performance reduction against population growth
+#with males
+dr2<-mean(DCom$Ratio[DCom$Metric=="Dispersal"])
+(1-dr2)/(1-fr)
+(1-dr2)/(1-pgr)
+
+#comparison of other genotypes to cb4856, "resistant" genotype
+fsr=mean(DComF[5:7,3]) #CB4856 DCOMf ratio for popG
+0.72065670/fsr
+fsd=mean(DComF[9:11,3]) #CB4856 DCOMf ratio for fecundity
+0.27672275/fsd # DComF, dispersal CB4856/mean of other genotypes
+#with males
+fsdM=mean(DCom[9:11,3])
+0.46126243/fsd
+```
+
+Figures of cross-scale comparison - Figure 4, s6
+```{r}
+palette=c("#000000","#525252","#969696","#d9d9d9")
+
+#without males - Fig. 4
+p4<-ggplot(data=DComF,aes(y=Host,x=Ratio,fill=Host))
+p4+facet_grid(cols=vars(Metric))+
+  geom_errorbar(aes(xmin=Ratio-SE, xmax=Ratio+SE), width=.2,size=1.2,color="black")+
+  geom_bar(stat="identity")+
+  scale_fill_manual(values=palette)+
+  xlim(0,1)+
+  theme_minimal()+
+  theme(axis.text.x = element_text(color = "grey20", size = 20),
+        axis.text.y = element_text(color = "grey20", size = 20),
+        axis.title.y = element_text(color = "grey20", size = 25),
+        axis.title.x = element_text(color = "grey20", size = 25))+
+  theme(panel.spacing = unit(2, "lines"))
+
+
+#without males - Fig S6
+pS4<-ggplot(data=DCom,aes(y=Host,x=Ratio,fill=Host))
+pS4+facet_grid(cols=vars(Metric))+
+  geom_errorbar(aes(xmin=Ratio-SE, xmax=Ratio+SE), width=.2,size=1.2,color="black")+
+  geom_bar(stat="identity")+
+  scale_fill_manual(values=palette)+
+  xlim(0,1)+
+  theme_minimal()+
+  theme(axis.text.x = element_text(color = "grey20", size = 20),
+        axis.text.y = element_text(color = "grey20", size = 20),
+        axis.title.y = element_text(color = "grey20", size = 25),
+        axis.title.x = element_text(color = "grey20", size = 25))+
+  theme(panel.spacing = unit(2, "lines"))
+```
+
